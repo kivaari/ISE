@@ -6,6 +6,7 @@ Information system engineering course project
 
 # ⚡ Our team
 kivaari - Belousov Egor 1/233
+
 kislota1 - Larin Oleg 1/233
 
 # ⚡ Roadmap
