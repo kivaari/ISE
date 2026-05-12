@@ -364,3 +364,220 @@
     - 10.3.1. Соблюдение законодательства о защите персональных данных (152-ФЗ / GDPR)
     - 10.3.2. Запрет на размещение и обработку запрещённого контента (DMCA compliance)
     - 10.3.3. Обязательная верификация (KYC) для вывода средств согласно требованиям платёжных шлюзов и антифрод-политик
+ 
+  
+# 4. Уточнение внешних систем: структура и формат данных
+
+В данном разделе уточняется перечень внешних систем и формализуются контракты данных, которыми система Cloudberries обменивается с ними. Основной формат передачи данных — **JSON**. Для критичных взаимодействий (платежи) используется REST API, для телеметрии — WebSocket/gRPC.
+
+## 4.1. Платёжный шлюз (YooKassa / Stripe)
+
+**Назначение:** Холдирование средств (Эскроу) при бронировании сервера и финальное списание по завершении задачи.<br>
+**Протокол:** REST API over HTTPS.<br>
+**Формат:** JSON.
+
+### Контракт API: Создание платежа (Описание в стиле OpenAPI)
+Ниже приведен пример фрагмента спецификации для создания платежа с холдированием.
+
+```yaml
+paths:
+  /payments:
+    post:
+      summary: Создание платежа (холдирование средств)
+      operationId: createEscrowPayment
+      tags:
+        - Billing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amount
+                - idempotency_key
+                - capture
+              properties:
+                amount:
+                  type: object
+                  description: Сумма платежа и валюта
+                  properties:
+                    value:
+                      type: string
+                      example: "1500.00"
+                    currency:
+                      type: string
+                      enum: [RUB, USD]
+                idempotency_key:
+                  type: string
+                  description: >
+                    Уникальный ключ идемпотентности для предотвращения двойного списания.
+                    Генерируется системой Cloudberries (UUID).
+                  example: "8008f0e6-5595-428d-87d4-772c28563b11"
+                capture:
+                  type: boolean
+                  description: >
+                    false — холдирование (деньги замораживаются на карте клиента, но не уходят поставщику).
+                    true — мгновенное списание.
+                  example: false
+                metadata:
+                  type: object
+                  description: Дополнительные данные, которые вернутся в вебхуке
+                  properties:
+                    order_id:
+                      type: string
+                      example: "ORD-998877"
+                    client_id:
+                      type: string
+      responses:
+        '200':
+          description: Платеж создан, статус 'waiting_for_capture'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: ID платежа в системе шлюза
+                  status:
+                    type: string
+                    enum: [pending, waiting_for_capture, succeeded, canceled]
+```
+
+### Пример данных вебхука (Входящий в Cloudberries)
+Когда статус платежа меняется, шлюз отправляет асинхронный запрос на наш API:
+
+```json
+{
+  "event": "payment.succeeded",
+  "object": {
+    "id": "22d6d597-000f-5000-9000-145f6df27d6f",
+    "status": "succeeded",
+    "amount": { "value": "1500.00", "currency": "RUB" },
+    "paid_at": "2026-05-13T10:05:00.000Z",
+    "metadata": {
+      "order_id": "ORD-998877"
+    }
+  }
+}
+```
+---
+
+## 4.2. Node Agent (Программный агент на сервере провайдера)
+
+**Назначение:** Мониторинг состояния оборудования (CPU, RAM, GPU) и выполнение команд платформы (запуск контейнера).<br>
+**Протокол:** WebSocket (для двустороннего реалтайм-связи) или gRPC.<br>
+**Формат:** JSON (поверх WebSocket).
+
+### Входящие данные (От Node Agent в Cloudberries)
+Агент отправляет метрики каждые 15-30 секунд.
+
+```json
+{
+  "node_id": "srv-node-042",
+  "timestamp": "2026-05-13T10:05:05Z",
+  "event_type": "metrics_report",
+  "payload": {
+    "cpu_load_percent": 45.2,
+    "ram_used_mb": 8192,
+    "gpu_temperature_celsius": 65,
+    "disk_free_gb": 100,
+    "active_containers": 2
+  }
+}
+```
+
+### Исходящие данные (От Cloudberries в Node Agent)
+Платформа отправляет команды управления.
+
+```json
+{
+  "command_id": "cmd-102938",
+  "action": "start_container",
+  "payload": {
+    "order_id": "ORD-998877",
+    "docker_image": "cloudberries/base-env:latest",
+    "resources": {
+      "cpus": 4,
+      "memory_mb": 16384
+    },
+    "ssh_keys": ["ssh-rsa AAAAB3NzaC... user@cloudberries"],
+    "expires_at": "2026-05-13T12:00:00Z"
+  }
+}
+```
+---
+
+## 4.3. OAuth Провайдер (Google / GitHub)
+
+**Назначение:** Быстрая регистрация и авторизация пользователей без ввода пароля.<br>
+**Протокол:** OAuth 2.0 (HTTP Redirect Flow).<br>
+**Формат:** JSON (при обмене токенами и профилем).
+
+### Структура ответа профиля (User Info)
+После успешной авторизации мы получаем JSON с данными пользователя:
+
+```json
+{
+  "sub": "110169484474386276334",
+  "name": "Олег Ларин",
+  "given_name": "Олег",
+  "family_name": "Ларин",
+  "email": "oleg@example.com",
+  "email_verified": true,
+  "picture": "https://...photo.jpg"
+}
+```
+---
+
+## 4.4. Сервис уведомлений (Email / SMS)
+
+**Назначение:** Информирование о статусах заказа и безопасности.<br>
+**Протокол:** REST API.
+
+### Запрос на отправку (Request Body)
+
+```json
+{
+  "to": "+79001234567",
+  "channel": "sms",
+  "template_id": "verification_code",
+  "variables": {
+    "code": "4928",
+    "ttl_minutes": 10
+  }
+}
+```
+---
+
+## Таблица внешних систем и интеграций
+| Наименование системы | Назначение (Функция) | Способ взаимодействия (Протокол/Интерфейс) | Обмениваемые данные |
+| :--- | :--- | :--- | :--- |
+| **Платёжный шлюз**<br>*(ЮKassa / Stripe / CloudPayments)* | Обработка входящих платежей от клиентов (арендаторов) и исходящих выплат поставщикам. Обеспечение прозрачности транзакций. | **REST API + Webhooks**<br>Синхронные запросы для создания платежа, асинхронные уведомления о смене статуса. | **От Cloudberries:** Сумма, валюта, ID заказа, токен карты (или ссылка на форму).<br>**В Cloudberries:** Статус транзакции (Success/Fail/Refund), ID операции. |
+| **Сервис уведомлений**<br>*(Email / SMS / Telegram)* | Информирование пользователей о статусе регистрации, подтверждение входа, отправка счетов (чеков), алерты о статусе сервера. | **SMTP / REST API**<br>Отправка событий на внешний шлюз, который сам доставляет сообщение. | **От Cloudberries:** Email/телефон пользователя, шаблон сообщения, переменные (имя, сумма, статус).<br>**В Cloudberries:** Статус доставки (Sent/Failed). |
+| **OAuth-провайдер**<br>*(Google / GitHub / VK ID)* | Упрощённая регистрация и авторизация. Позволяет пользователям входить в систему без создания нового пароля (особенно актуально для GitHub среди разработчиков). | **OAuth 2.0**<br>Redirect flow (перенаправление). | **От Cloudberries:** Client ID, Redirect URI, Scope (права доступа).<br>**В Cloudberries:** Access Token, профиль пользователя (Name, Email, Avatar). |
+| **Node Agent**<br>*(Клиентское ПО на сервере провайдера)* | Программный модуль, устанавливаемый на оборудовании поставщика. Связующее звено между "железом" и платформой. | **WebSocket / gRPC**<br>Двусторонний постоянный канал связи (Push-модель). | **От Агента (в Cloudberries):** Телеметрия (CPU/RAM load), статус (Online/Offline), heartbeat.<br>**От Cloudberries (в Агента):** Команды запуска/остановки контейнера, конфигурация доступа. |
+| **Облачное хранилище (S3)**<br>*(Yandex Cloud Object Storage / AWS S3)* | Хранение статического контента: аватары пользователей, скриншоты серверов, логи ошибок, бэкапы базы данных. | **S3 API**<br>Загрузка и скачивание бинарных объектов. | **От Cloudberries:** Файлы (изображения, логи).<br>**В Cloudberries:** Ссылки на объекты (URLs), статус загрузки. |
+
+## Сводная таблица интеграций
+| Система | Протокол | Формат | Ключевые данные обмена | Требования к безопасности |
+| :--- | :--- | :--- | :--- | :--- |
+| **Платёжный шлюз** | REST API (HTTPS) | JSON | `amount`, `currency`, `idempotency_key`, `status` | PCI DSS Compliance. Данные карт не хранятся. Проверка подписи Webhook. |
+| **Node Agent** | WebSocket / gRPC | JSON / Protobuf | `cpu_load`, `ram_used`, `docker_image`, `command` | mTLS (двусторонняя аутентификация) или JWT-токен для агента. |
+| **OAuth Провайдер** | HTTP (Redirect) | JSON | `email`, `name`, `access_token` | Использование стандартных OAuth scopes. Хранение токена в зашифрованном виде. |
+| **Уведомления** | REST API | JSON | `to`, `template_id`, `variables` | API Key в заголовке `Authorization`. Маскирование персональных данных в логах. |
+| **Облачное хранилище (S3)** | REST (S3 Protocol) | Binary | `Bucket`, `Key`, `Content-Type` | Доступ через IAM роли. Presigned URLs (временные ссылки) для скачивания. |
+
+## Карта обмена данными
+
+Взята из предыдущей итерации.
+
+| Внешняя система | Входящие данные (В Cloudberries) | Исходящие данные (Из Cloudberries) |
+| :--- | :--- | :--- |
+| **Платёжный шлюз** | • `status`: Success / Fail / Pending<br>• `transaction_id`: Уникальный номер транзакции<br>• `amount_refunded`: Сумма возврата (при отмене)<br>• `payment_method`: Тип карты/кошелька | • `amount`: Сумма к списанию (руб./коп.)<br>• `currency`: Валюта (RUB/USD)<br>• `order_id`: ID заказа в системе<br>• `customer_email`: Email для отправки чека<br>• `return_url`: Ссылка возврата в ЛК |
+| **Node Agent** | • `metrics`: CPU load (%), RAM usage (GB), Disk I/O<br>• `status`: Online / Offline / Error<br>• `heartbeat`: Timestamp последнего пинга<br>• `node_ip`: Публичный IP адрес сервера | • `task_command`: Start / Stop / Restart Container<br>• `credentials`: SSH Keys / Token доступа<br>• `config_update`: Обновление лимитов ресурсов |
+| **Сервис уведомлений** | • `delivery_status`: Delivered / Failed / Read | • `recipient`: Email / Phone Number / Telegram ID<br>• `template_id`: Код шаблона сообщения<br>• `variables`: Имя, Сумма, Код подтверждения |
+| **OAuth Провайдер** | • `user_profile`: Name, Email, Avatar URL<br>• `access_token`: Токен доступа к API провайдера | • `client_id`: Идентификатор приложения<br>• `redirect_uri`: Ссылка для callback<br>• `scope`: Запрашиваемые права доступа |
+
+---
