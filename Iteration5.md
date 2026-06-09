@@ -713,7 +713,7 @@ COMMIT;
 ```
 **Как это работает:** Использование реляционной БД (PostgreSQL) позволяет выполнить все три операции в рамках одной ACID-транзакции. CHECK-ограничение `balance >= 0` (реализованное через условие в UPDATE) предотвращает уход в овердрафт. В случае сбоя произойдет автоматический ROLLBACK.
 
-### 🔹 Механизм 3: Аудиторский след для арбитража (Audit Trail)
+### Механизм 3: Аудиторский след для арбитража (Audit Trail)
 **Бизнес-проблема:** Провайдер утверждает, что сервер работал 2 часа, клиент — что он упал через 30 минут. Нужны объективные данные.
 **Решение в модели данных:**
 Таблица `billing_records` имеет внешний ключ на `metrics_snapshots`.
@@ -737,3 +737,193 @@ ORDER BY br.minute_offset;
 | **Масштабируемость (Scalability)** | Использование `UUID` вместо `SERIAL` для Primary Keys. | Позволяет генерировать ID на клиенте/агенте без обращения к БД, что устраняет bottleneck при горизонтальном масштабировании API и Agent Gateway. |
 | **Надёжность (Reliability)** | FOREIGN KEY с `ON DELETE RESTRICT` для `bookings` → `escrow_transactions`. | Запрещает случайное удаление заказа, если по нему уже есть финансовые транзакции. Обеспечивает ссылочную целостность (Referential Integrity). |
 | **Расширяемость (Extensibility)** | Использование `JSONB` для `wallets.payout_details` и `availability_schedules.weekly_slots`. | Позволяет добавлять новые типы реквизитов для вывода средств или сложные расписания доступности без выполнения DDL-миграций и остановки сервиса. |
+
+
+# 4. Ключевые сценарии использования системы
+
+В данном разделе представлены три ключевых сценария, которые демонстрируют, как концептуальная архитектура (Итерация 4) и модель данных (пункты 1–2 Итерации 5) совместно реализуют основные бизнес-требования. Каждый сценарий включает:
+- Основной поток (Happy Path) или поток обработки ошибки
+- Sequence Diagram для визуализации взаимодействия компонентов
+- Перечень задействованных сущностей модели данных
+- Привязку к бизнес-требованиям и NFR
+- Обоснование достижения качественных характеристик
+
+
+
+## 4.1. Сценарий 1: Аренда сервера клиентом (Happy Path)
+
+**Акторы:** Клиент (Арендатор), Система Cloudberries, Платёжный шлюз, Node Agent  
+**Предусловия:** Клиент зарегистрирован и прошёл базовую верификацию (`kyc_status = 'verified'`), на кошельке достаточно средств или привязана карта.
+
+### Основной поток
+
+| Шаг | Действие | Компонент | Сущность БД |
+|:---|:---|:---|:---|
+| 1 | Клиент открывает каталог, применяет фильтры (GPU=RTX3080, RAM≥16GB) | Web App → Core API (`Catalog Service`) → Redis | `nodes`, `hardware_specs` (читаются из кэша Redis) |
+| 2 | Клиент выбирает ноду, указывает длительность (2 часа), видит итоговую цену с комиссией | Core API (`Booking Service`) | `nodes.price_per_hour` |
+| 3 | Клиент подтверждает бронирование | Core API (`Booking Service`) | — |
+| 4 | Создаётся запись заказа со статусом `pending`, генерируется `idempotency_key` | Core API → `bookings` | `bookings` (INSERT) |
+| 5 | Core API вызывает платёжный шлюз с `capture: false` (холдирование) | Core API → Payment Gateway | `escrow_transactions` (INSERT, status=`hold`) |
+| 6 | Платёжный шлюз возвращает `waiting_for_capture`, клиент проходит 3DS | Payment Gateway → Web App | — |
+| 7 | Приходит вебхук `payment.succeeded` | Payment Gateway → Async Workers | `escrow_transactions` (UPDATE status=`captured`) |
+| 8 | Worker меняет статус заказа на `active`, генерирует SSH-ключи, публикует событие `BookingCreated` | Async Workers → Message Broker | `bookings` (UPDATE status=`active`), `access_credentials` (INSERT) |
+| 9 | Agent Gateway получает команду `start_container` и отправляет её Node Agent | Message Broker → Agent Gateway → Node Agent | — |
+| 10 | Node Agent запускает Docker-контейнер, подтверждает выполнение | Node Agent → Agent Gateway | `telemetry_sessions` (INSERT, status=`active`) |
+| 11 | Клиент получает SSH-доступ в личном кабинете | Web App ← Core API | `access_credentials` (чтение) |
+| 12 | Каждую минуту Async Worker списывает средства, создаёт `billing_record` | Async Workers → Primary DB | `billing_records` (INSERT), `wallets` (UPDATE balance) |
+| 13 | По истечении времени или по команде клиента — сессия завершается | Async Workers → Agent Gateway → Node Agent | `bookings` (UPDATE status=`completed`), `escrow_transactions` (UPDATE status=`captured`) |
+| 14 | Средства переводятся провайдеру за вычетом комиссии платформы | Async Workers → Payment Gateway | `wallets` (UPDATE balance у провайдера) |
+
+### Диаграмма последовательности
+
+![image](images/Iter5Seq1.png)
+
+### Затрагиваемые компоненты архитектуры
+- **Web App** — интерфейс каталога и личного кабинета
+- **Core API** (`Catalog Service`, `Booking Service`, `Escrow Service`) — бизнес-логика
+- **Primary DB** — атомарное хранение заказов и транзакций
+- **Redis** — кэш каталога для низкой задержки
+- **Async Workers** — обработка вебхуков, биллинг, выплаты
+- **Message Broker** — декуплинг между Core API и Agent Gateway
+- **Agent Gateway** — маршрутизация команд к Node Agent
+- **Payment Gateway** — холдирование и списание
+
+### Используемые сущности модели данных
+`users`, `nodes`, `hardware_specs`, `bookings`, `escrow_transactions`, `access_credentials`, `wallets`, `billing_records`, `telemetry_sessions`
+
+### Связь с бизнес-требованиями и NFR
+
+| Бизнес-требование | Как сценарий обеспечивает |
+|:---|:---|
+| **Demand Activation** (конверсия ≥25%) | Прозрачный калькулятор до оплаты, SSH-доступ ≤60 сек |
+| **Trust & Escrow** (≥95% успешных сделок) | Холдирование через `capture: false`, статусная машина заказа |
+| **Billing Automation** (латентность ≤5 сек) | Поминутное списание через Async Workers, идемпотентность через `idempotency_key` |
+| **Performance** (API latency ≤200 мс) | Чтение каталога из Redis, асинхронная обработка тяжёлых операций |
+| **Reliability** (exactly-once billing) | Уникальный `idempotency_key` в БД, ACID-транзакции |
+
+---
+
+## 4.2. Сценарий 2: Подключение и монетизация оборудования провайдером (Happy Path)
+
+**Акторы:** Провайдер (Владелец), Система Cloudberries, Node Agent  
+**Предусловия:** Провайдер зарегистрирован, прошёл расширенную верификацию (`kyc_level = 'extended'`), имеет сервер с Ubuntu 20.04+.
+
+### Основной поток
+
+| Шаг | Действие | Компонент | Сущность БД |
+|:---|:---|:---|:---|
+| 1 | Провайдер заходит в личный кабинет, выбирает «Добавить сервер» | Web App → Core API (`Auth Service`) | `users` (чтение роли) |
+| 2 | Система генерирует уникальный токен установки и скрипт `curl \| bash` | Core API | `agent_states` (предварительная запись) |
+| 3 | Провайдер запускает скрипт на сервере | Node Agent (установка) | — |
+| 4 | Node Agent определяет характеристики железа (CPU/RAM/GPU) и отправляет их | Node Agent → Agent Gateway (gRPC) | `hardware_specs` (INSERT) |
+| 5 | Agent Gateway создаёт запись ноды со статусом `offline` | Agent Gateway → Core API → DB | `nodes` (INSERT, status=`offline`) |
+| 6 | Провайдер в UI выставляет цену за час и расписание доступности | Web App → Core API | `nodes.price_per_hour`, `availability_schedules` (INSERT) |
+| 7 | Провайдер включает тумблер «Доступна» | Web App → Core API | `nodes` (UPDATE status=`online`) |
+| 8 | Node Agent начинает отправлять heartbeat каждые 15 сек | Node Agent → Agent Gateway → Redis | `agent_states` (UPDATE last_heartbeat_at) |
+| 9 | Нода появляется в каталоге для клиентов | Core API (`Catalog Service`) обновляет кэш | Redis (хэш ноды) |
+| 10 | Поступает заказ от клиента (Сценарий 1) | Core API → Message Broker → Agent Gateway | `bookings` (INSERT) |
+| 11 | Node Agent запускает контейнер, шлёт телеметрию | Node Agent → Agent Gateway → Message Broker | `metrics_snapshots` (INSERT) |
+| 12 | Async Worker начисляет доход провайдеру на кошелёк | Async Workers → DB | `wallets` (UPDATE balance у провайдера) |
+| 13 | Провайдер запрашивает выплату | Web App → Core API → Payment Gateway | `wallets` (UPDATE frozen_amount), `payout_details` |
+| 14 | Средства поступают на карту провайдера в течение 24 часов | Payment Gateway → Банк | — |
+
+### Диаграмма последовательности
+
+![image](images/Iter5Seq2.png)
+
+### Затрагиваемые компоненты архитектуры
+- **Web App** — личный кабинет провайдера
+- **Core API** (`Auth Service`, `Catalog Service`) — управление нодами
+- **Agent Gateway** — регистрация и приём телеметрии
+- **Node Agent** — клиентское ПО на сервере
+- **Primary DB** — хранение нод, расписаний, спецификаций
+- **Redis** — быстрый кэш статусов для каталога
+- **Async Workers** — начисление доходов и выплаты
+- **Payment Gateway** — вывод средств
+
+### Используемые сущности модели данных
+`users`, `nodes`, `hardware_specs`, `availability_schedules`, `agent_states`, `metrics_snapshots`, `wallets`, `bookings`, `billing_records`
+
+### Связь с бизнес-требованиями и NFR
+
+| Бизнес-требование | Как сценарий обеспечивает |
+|:---|:---|
+| **Supply Growth** (Active Nodes Rate ≥35%) | Онбординг за 15 минут через одну команду, автоопределение железа |
+| **Asset Utilization** (≥60%) | Гибкое расписание `availability_schedules` в JSONB |
+| **Host Security** (0 инцидентов) | mTLS/JWT аутентификация агента, изоляция контейнеров |
+| **Payment Security** (задержка выплат ≤24ч) | Автоматическое начисление на `wallets`, запрос выплаты через Payment Gateway |
+| **Scalability** (до 5000 нод) | Выделенный Agent Gateway, пакетная запись метрик, кэш Redis |
+
+---
+
+## 4.3. Сценарий 3: Сбой Node Agent во время активной сессии (Error Scenario)
+
+**Акторы:** Клиент, Node Agent, Система Cloudberries  
+**Предусловия:** Активная сессия (`bookings.status = 'active'`), клиент выполняет задачу на сервере.
+
+### Поток обработки сбоя
+
+| Шаг | Событие | Компонент | Действие | Сущность БД |
+|:---|:---|:---|:---|:---|
+| 1 | Node Agent перестаёт отвечать (сбой сети, падение сервера) | — | Heartbeat не приходит | — |
+| 2 | Agent Gateway обнаруживает отсутствие heartbeat > 60 сек | Agent Gateway | Меняет статус в Redis на `lost` | Redis (статус ноды) |
+| 3 | Agent Gateway публикует событие `NodeLost` в Message Broker | Agent Gateway → MQ | — | — |
+| 4 | Async Worker получает событие, находит активные сессии на ноде | Async Workers → DB | SELECT bookings WHERE node_id=X AND status=active | `bookings`, `telemetry_sessions` |
+| 5 | Worker меняет статус сессии на `lost`, останавливает биллинг | Async Workers → DB | UPDATE telemetry_sessions SET status=`lost` | `telemetry_sessions` |
+| 6 | Worker создаёт запись в `disputes` автоматически | Async Workers → DB | INSERT INTO disputes (reason=`node_unreachable`) | `disputes` |
+| 7 | Клиент получает push/email уведомление о сбое | Async Workers → Notification Service | — | — |
+| 8 | Worker делает snapshot последних метрик для арбитража | Async Workers → DB | Копирование `metrics_snapshots` в `evidences` | `evidences` |
+| 9 | Клиенту предлагается: (а) миграция на другую ноду, (б) полный возврат | Web App → Core API | — | — |
+| 10 | При выборе возврата — средства размораживаются и возвращаются | Core API → Payment Gateway | UPDATE escrow_transactions SET status=`refunded` | `escrow_transactions`, `wallets` |
+| 11 | Рейтинг провайдера пересчитывается (interruption_rate растёт) | Async Workers → DB | UPDATE reputations SET interruption_rate=... | `reputations` |
+| 12 | При восстановлении связи — нода переходит в `maintenance` до проверки админом | Agent Gateway → Core API | UPDATE nodes SET status=`maintenance` | `nodes` |
+
+### Диаграмма последовательности
+
+![image](images/Iter5Seq3.png)
+
+### Затрагиваемые компоненты архитектуры
+- **Agent Gateway** — детектирование потери heartbeat
+- **Message Broker** — асинхронная доставка события сбоя
+- **Async Workers** — оркестрация восстановления и арбитража
+- **Primary DB** — атомарное обновление статусов, создание спора
+- **Redis** — быстрое обновление статуса ноды
+- **Notification Service** — информирование клиента
+- **Payment Gateway** — возврат средств
+
+### Используемые сущности модели данных
+`nodes`, `telemetry_sessions`, `bookings`, `disputes`, `evidences`, `metrics_snapshots`, `escrow_transactions`, `wallets`, `reputations`
+
+### Связь с бизнес-требованиями и NFR
+
+| Бизнес-требование / NFR | Как сценарий обеспечивает |
+|:---|:---|
+| **SLA Assurance** (прерывания <1%) | Автоматический детект сбоя через heartbeat, мгновенное уведомление |
+| **Trust & Escrow** (≥95% успешных сделок) | Автовозврат средств при сбое, фиксация доказательств в `evidences` |
+| **Reliability** (Data Loss <0.01%) | Snapshot метрик до закрытия сессии, статус `lost` вместо молчаливого обрыва |
+| **Performance** (детект ≤60 сек) | Heartbeat каждые 15 сек, порог 60 сек в Agent Gateway |
+| **Host Security** | Нода уходит в `maintenance`, а не сразу в `online` — требует проверки админом |
+
+---
+
+## 4.4. Сводная матрица сценариев и требований
+
+| Сценарий | Тип | Ключевые бизнес-требования | Затронутые NFR | Критичность для MVP |
+|:---|:---|:---|:---|:---|
+| **1. Аренда сервера клиентом** | Happy Path | Demand Activation, Trust & Escrow, Billing Automation | Performance, Reliability, Security | Критичный |
+| **2. Монетизация провайдером** | Happy Path | Supply Growth, Asset Utilization, Payment Security | Scalability, Extensibility | Критичный |
+| **3. Сбой Node Agent** | Error Scenario | SLA Assurance, Trust & Escrow, Host Security | Reliability, Availability | Важный |
+
+---
+
+## 4.5. Вывод по пункту 4
+
+Представленные сценарии демонстрируют **целостность решения**:
+
+1. **Сценарий 1** показывает, как синхронный путь пользователя (каталог → оплата) сочетается с асинхронным путём (запуск контейнера, биллинг), что обеспечивает и низкую задержку UI, и надёжность финансовых операций.
+
+2. **Сценарий 2** демонстрирует, как выделенный Agent Gateway и кэш Redis решают проблему write-heavy нагрузки телеметрии, не влияя на пользовательский опыт.
+
+3. **Сценарий 3** подтверждает, что архитектура готова к отказам: детект сбоя через heartbeat, автоматический арбитраж через `disputes`/`evidences`, возврат средств через эскроу — всё это заложено в модель данных и компоненты системы.
+
+Каждый сценарий **трассируется** на конкретные бизнес-требования из Итерации 2–3, компоненты архитектуры из Итерации 4 и сущности модели данных из пунктов 1–2 Итерации 5. Это доказывает, что решение непротиворечиво и готово к реализации.
