@@ -164,3 +164,507 @@
 - Защищает данные от удаления/изменения
 - Даёт администратору объективную картину
 - Реализует KPI `Dispute Resolution Time ≤ 24ч`
+
+# 2. Логическая модель данных (ER-диаграмма)
+
+В данном разделе концептуальная модель предметной области (п. 1) трансформируется в **логическую модель данных** — набор сущностей, атрибутов и связей, готовых к реализации в реляционной СУБД PostgreSQL. Модель спроектирована с учётом:
+- **ACID-требований** для финансовых операций (эскроу, биллинг)
+- **Write-heavy нагрузки** телеметрии (~1000 msg/sec)
+- **Read-heavy нагрузки** каталога (поиск и фильтрация нод)
+- **Требований 152-ФЗ** к хранению персональных данных
+
+
+## 2.1. ER-диаграмма (Mermaid)
+```mermaid
+erDiagram
+    %% === IDENTITY CONTEXT ===
+    User {
+        uuid id PK
+        string email UK
+        string phone
+        string password_hash
+        enum role "client|provider|admin"
+        enum kyc_status "none|pending|verified|rejected"
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    Wallet {
+        uuid id PK
+        uuid user_id FK
+        decimal balance
+        decimal frozen_amount
+        string currency
+        jsonb payout_details
+    }
+
+    Verification {
+        uuid id PK
+        uuid user_id FK
+        enum kyc_level "basic|extended"
+        string document_hash
+        string status
+        timestamp verified_at
+    }
+
+    %% === CATALOG CONTEXT ===
+    Node {
+        uuid id PK
+        uuid provider_id FK
+        enum status "online|offline|maintenance|busy"
+        decimal price_per_hour
+        string region
+        string hostname
+        timestamp last_seen_at
+        timestamp created_at
+    }
+
+    HardwareSpecs {
+        uuid id PK
+        uuid node_id FK
+        int cpu_cores
+        string cpu_model
+        int ram_gb
+        string gpu_model
+        int gpu_vram_gb
+        string disk_type
+        int disk_gb
+    }
+
+    AvailabilitySchedule {
+        uuid id PK
+        uuid node_id FK
+        jsonb weekly_slots
+        timestamp blocked_until
+    }
+
+    Reputation {
+        uuid id PK
+        uuid node_id FK
+        decimal rating
+        int total_sessions
+        decimal interruption_rate
+    }
+
+    %% === BOOKING CONTEXT ===
+    Booking {
+        uuid id PK
+        uuid client_id FK
+        uuid node_id FK
+        enum status "pending|active|completed|cancelled|dispute"
+        timestamp started_at
+        timestamp ended_at
+        decimal total_amount
+        string idempotency_key UK
+    }
+
+    EscrowTransaction {
+        uuid id PK
+        uuid booking_id FK
+        decimal amount
+        string currency
+        string gateway_id
+        enum status "hold|captured|refunded"
+        string idempotency_key UK
+    }
+
+    BillingRecord {
+        uuid id PK
+        uuid booking_id FK
+        int minute_offset
+        decimal amount_charged
+        uuid telemetry_snapshot_id FK
+    }
+
+    AccessCredentials {
+        uuid id PK
+        uuid booking_id FK
+        string ssh_key
+        string ip_address
+        int port
+        timestamp expires_at
+    }
+
+    %% === TELEMETRY CONTEXT ===
+    TelemetrySession {
+        uuid id PK
+        uuid node_id FK
+        uuid booking_id FK
+        timestamp started_at
+        timestamp last_heartbeat_at
+        enum status "active|lost|closed"
+    }
+
+    MetricsSnapshot {
+        uuid id PK
+        uuid telemetry_session_id FK
+        timestamp timestamp
+        decimal cpu_load
+        int ram_used_mb
+        decimal gpu_temp
+        int disk_io
+    }
+
+    AgentState {
+        uuid id PK
+        uuid node_id FK
+        string agent_version
+        enum connection_status "connected|disconnected"
+        string last_command_id
+    }
+
+    %% === DISPUTE CONTEXT ===
+    Dispute {
+        uuid id PK
+        uuid booking_id FK
+        uuid raised_by FK
+        string reason
+        enum status "open|investigating|resolved"
+        timestamp created_at
+    }
+
+    Evidence {
+        uuid id PK
+        uuid dispute_id FK
+        string type "telemetry|logs|chat"
+        string reference_id
+        timestamp attached_at
+    }
+
+    Resolution {
+        uuid id PK
+        uuid dispute_id FK
+        enum decision "refund|partial|none"
+        decimal amount
+        uuid resolved_by FK
+        timestamp resolved_at
+    }
+
+    %% === RELATIONSHIPS ===
+    User ||--o| Wallet : "has"
+    User ||--o| Verification : "undergoes"
+    User ||--o{ Booking : "creates as client"
+    User ||--o{ Node : "owns as provider"
+    User ||--o{ Dispute : "raises"
+
+    Node ||--o| HardwareSpecs : "has"
+    Node ||--o| AvailabilitySchedule : "configured by"
+    Node ||--o| Reputation : "measured by"
+    Node ||--o{ Booking : "hosts"
+    Node ||--o{ TelemetrySession : "monitored by"
+    Node ||--o| AgentState : "tracked by"
+
+    Booking ||--o| EscrowTransaction : "funded by"
+    Booking ||--o{ BillingRecord : "billed by"
+    Booking ||--o| AccessCredentials : "secured by"
+    Booking ||--o{ TelemetrySession : "monitored via"
+    Booking ||--o{ Dispute : "may trigger"
+
+    TelemetrySession ||--o{ MetricsSnapshot : "records"
+    Dispute ||--o{ Evidence : "supported by"
+    Dispute ||--o| Resolution : "closed by"
+```
+ER-диаграмма (PlantUML)
+![image](images/ERDplantuml.png)
+
+## 2.2. Детальное описание таблиц
+
+### Identity Context
+
+#### `users`
+| Атрибут | Тип PostgreSQL | Ограничения | Описание |
+|---------|----------------|-------------|----------|
+| `id` | `UUID` | PK, DEFAULT gen_random_uuid() | Уникальный идентификатор пользователя |
+| `email` | `VARCHAR(255)` | UNIQUE, NOT NULL | Email для входа и уведомлений |
+| `phone` | `VARCHAR(20)` | — | Телефон для 2FA и KYC |
+| `password_hash` | `VARCHAR(255)` | — | Хэш пароля (bcrypt/argon2) |
+| `role` | `ENUM('client','provider','admin')` | NOT NULL | Роль в системе |
+| `kyc_status` | `ENUM('none','pending','verified','rejected')` | DEFAULT 'none' | Статус верификации |
+| `created_at` | `TIMESTAMPTZ` | DEFAULT now() | Дата регистрации |
+| `updated_at` | `TIMESTAMPTZ` | DEFAULT now() | Дата последнего изменения |
+
+**Индексы:** `idx_users_email` (unique), `idx_users_role`, `idx_users_kyc_status`
+
+---
+
+#### `wallets`
+| Атрибут | Тип | Ограничения | Описание |
+|---------|-----|-------------|----------|
+| `id` | `UUID` | PK | Идентификатор кошелька |
+| `user_id` | `UUID` | FK → users.id, UNIQUE | Владелец кошелька (1:1) |
+| `balance` | `DECIMAL(12,2)` | CHECK (balance >= 0) | Доступный баланс |
+| `frozen_amount` | `DECIMAL(12,2)` | CHECK (frozen_amount >= 0) | Замороженные средства (эскроу) |
+| `currency` | `CHAR(3)` | DEFAULT 'RUB' | Валюта кошелька |
+| `payout_details` | `JSONB` | — | Реквизиты для вывода (карта/счёт) |
+
+**Индексы:** `idx_wallets_user_id` (unique)
+
+**Обоснование типов:** `DECIMAL(12,2)` вместо `FLOAT` исключает ошибки округления при финансовых операциях. `JSONB` для реквизитов позволяет хранить разнородные данные (карта, банковский счёт, крипто-адрес) без изменения схемы.
+
+---
+
+#### `verifications`
+| Атрибут | Тип | Ограничения | Описание |
+|---------|-----|-------------|----------|
+| `id` | `UUID` | PK | Идентификатор верификации |
+| `user_id` | `UUID` | FK → users.id | Пользователь |
+| `kyc_level` | `ENUM('basic','extended')` | NOT NULL | Уровень проверки |
+| `document_hash` | `VARCHAR(64)` | — | Хэш загруженного документа (SHA-256) |
+| `status` | `ENUM('pending','approved','rejected')` | DEFAULT 'pending' | Статус проверки |
+| `verified_at` | `TIMESTAMPTZ` | — | Дата подтверждения |
+
+**Индексы:** `idx_verifications_user_id`, `idx_verifications_status`
+
+**Безопасность:** Сами документы не хранятся в БД — только хэш. Оригиналы загружаются в S3 с шифрованием.
+
+---
+
+### Catalog Context
+
+#### `nodes`
+| Атрибут | Тип | Ограничения | Описание |
+|---------|-----|-------------|----------|
+| `id` | `UUID` | PK | Идентификатор ноды |
+| `provider_id` | `UUID` | FK → users.id | Владелец ноды |
+| `status` | `ENUM('online','offline','maintenance','busy')` | NOT NULL | Текущий статус |
+| `price_per_hour` | `DECIMAL(8,2)` | CHECK (price > 0) | Цена аренды в час |
+| `region` | `VARCHAR(50)` | — | Географический регион |
+| `hostname` | `VARCHAR(255)` | UNIQUE | Уникальное имя ноды |
+| `last_seen_at` | `TIMESTAMPTZ` | — | Время последнего heartbeat |
+| `created_at` | `TIMESTAMPTZ` | DEFAULT now() | Дата добавления |
+
+**Индексы:** `idx_nodes_provider_id`, `idx_nodes_status`, `idx_nodes_region`, `idx_nodes_price_per_hour`, `idx_nodes_last_seen_at`
+
+---
+
+#### `hardware_specs`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `node_id` | `UUID` | FK → nodes.id (1:1) |
+| `cpu_cores` | `INT` | Количество ядер CPU |
+| `cpu_model` | `VARCHAR(100)` | Модель процессора |
+| `ram_gb` | `INT` | Объём RAM в ГБ |
+| `gpu_model` | `VARCHAR(100)` | Модель GPU (nullable) |
+| `gpu_vram_gb` | `INT` | Объём VRAM (nullable) |
+| `disk_type` | `ENUM('hdd','ssd','nvme')` | Тип диска |
+| `disk_gb` | `INT` | Объём диска в ГБ |
+
+**Индексы:** `idx_specs_node_id` (unique), `idx_specs_gpu_model`, `idx_specs_ram_gb`
+
+**Обоснование:** Вынесено в отдельную таблицу для нормализации — характеристики меняются реже, чем статус ноды.
+
+---
+
+#### `availability_schedules`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `node_id` | `UUID` | FK → nodes.id (1:1) |
+| `weekly_slots` | `JSONB` | Расписание: `{"mon": [0,480], "tue": [0,480], ...}` (минуты с начала дня) |
+| `blocked_until` | `TIMESTAMPTZ` | Временная блокировка (например, для личных нужд) |
+
+---
+
+#### `reputations`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `node_id` | `UUID` | FK → nodes.id (1:1) |
+| `rating` | `DECIMAL(2,1)` | Средний рейтинг 0.0–5.0 |
+| `total_sessions` | `INT` | Количество завершённых сессий |
+| `interruption_rate` | `DECIMAL(5,4)` | Доля прерванных сессий (0.0000–1.0000) |
+
+---
+
+### Booking Context (Центральный агрегат)
+
+#### `bookings`
+| Атрибут | Тип | Ограничения | Описание |
+|---------|-----|-------------|----------|
+| `id` | `UUID` | PK | Идентификатор бронирования |
+| `client_id` | `UUID` | FK → users.id | Арендатор |
+| `node_id` | `UUID` | FK → nodes.id | Арендуемая нода |
+| `status` | `ENUM('pending','active','completed','cancelled','dispute')` | NOT NULL | Статус заказа |
+| `started_at` | `TIMESTAMPTZ` | — | Начало аренды |
+| `ended_at` | `TIMESTAMPTZ` | — | Конец аренды (NULL если активна) |
+| `total_amount` | `DECIMAL(10,2)` | — | Итоговая сумма |
+| `idempotency_key` | `VARCHAR(64)` | UNIQUE | Ключ идемпотентности для защиты от дублей |
+
+**Индексы:** `idx_bookings_client_id`, `idx_bookings_node_id`, `idx_bookings_status`, `idx_bookings_started_at`, `idx_bookings_idempotency_key` (unique)
+
+---
+
+#### `escrow_transactions`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `booking_id` | `UUID` | FK → bookings.id |
+| `amount` | `DECIMAL(10,2)` | Сумма транзакции |
+| `currency` | `CHAR(3)` | Валюта |
+| `gateway_id` | `VARCHAR(100)` | ID транзакции в платёжном шлюзе |
+| `status` | `ENUM('hold','captured','refunded')` | Статус эскроу |
+| `idempotency_key` | `VARCHAR(64)` | Уникальный ключ |
+
+**Индексы:** `idx_escrow_booking_id`, `idx_escrow_gateway_id`, `idx_escrow_idempotency_key` (unique)
+
+---
+
+#### `billing_records`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `booking_id` | `UUID` | FK → bookings.id |
+| `minute_offset` | `INT` | Минута с начала аренды |
+| `amount_charged` | `DECIMAL(8,4)` | Сумма за минуту |
+| `telemetry_snapshot_id` | `UUID` | FK → metrics_snapshots.id (nullable) |
+
+**Индексы:** `idx_billing_booking_id`, `idx_billing_minute_offset`
+
+**Обоснование:** Встроены в Booking как embedded-коллекция (логически), но физически — отдельная таблица для возможности пакетной записи и эффективного аудита.
+
+---
+
+#### `access_credentials`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `booking_id` | `UUID` | FK → bookings.id (1:1) |
+| `ssh_key` | `TEXT` | Публичный SSH-ключ клиента |
+| `ip_address` | `INET` | IP-адрес ноды |
+| `port` | `INT` | Порт SSH |
+| `expires_at` | `TIMESTAMPTZ` | Время истечения доступа |
+
+**Индексы:** `idx_credentials_booking_id` (unique)
+
+---
+
+### Telemetry Context
+
+#### `telemetry_sessions`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `node_id` | `UUID` | FK → nodes.id |
+| `booking_id` | `UUID` | FK → bookings.id |
+| `started_at` | `TIMESTAMPTZ` | Начало сессии |
+| `last_heartbeat_at` | `TIMESTAMPTZ` | Последний heartbeat |
+| `status` | `ENUM('active','lost','closed')` | Статус сессии |
+
+**Индексы:** `idx_telemetry_node_id`, `idx_telemetry_booking_id`, `idx_telemetry_status`
+
+---
+
+#### `metrics_snapshots`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `telemetry_session_id` | `UUID` | FK → telemetry_sessions.id |
+| `timestamp` | `TIMESTAMPTZ` | Время замера |
+| `cpu_load` | `DECIMAL(5,2)` | Загрузка CPU в % |
+| `ram_used_mb` | `INT` | Использовано RAM в МБ |
+| `gpu_temp` | `DECIMAL(5,2)` | Температура GPU в °C |
+| `disk_io` | `INT` | Дисковый I/O в МБ/с |
+
+**Индексы:** `idx_metrics_session_id`, `idx_metrics_timestamp`
+
+**Обоснование:** Это **write-heavy таблица** (~1000 записей/сек). В production рекомендуется:
+- Партиционирование по `timestamp` (месячные партиции)
+- Отдельный tablespace на быстром SSD
+- Агрегация сырых данных в hourly/daily rollups через материализованные представления
+
+---
+
+#### `agent_states`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `node_id` | `UUID` | FK → nodes.id (1:1) |
+| `agent_version` | `VARCHAR(20)` | Версия Node Agent |
+| `connection_status` | `ENUM('connected','disconnected')` | Статус соединения |
+| `last_command_id` | `VARCHAR(64)` | ID последней команды |
+
+---
+
+### Dispute Context
+
+#### `disputes`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `booking_id` | `UUID` | FK → bookings.id |
+| `raised_by` | `UUID` | FK → users.id (кто открыл спор) |
+| `reason` | `TEXT` | Описание проблемы |
+| `status` | `ENUM('open','investigating','resolved')` | Статус спора |
+| `created_at` | `TIMESTAMPTZ` | Дата открытия |
+
+**Индексы:** `idx_disputes_booking_id`, `idx_disputes_status`, `idx_disputes_created_at`
+
+---
+
+#### `evidences`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `dispute_id` | `UUID` | FK → disputes.id |
+| `type` | `ENUM('telemetry','logs','chat')` | Тип доказательства |
+| `reference_id` | `VARCHAR(100)` | Ссылка на источник (ID снапшота, лога) |
+| `attached_at` | `TIMESTAMPTZ` | Дата прикрепления |
+
+---
+
+#### `resolutions`
+| Атрибут | Тип | Описание |
+|---------|-----|----------|
+| `id` | `UUID` | PK |
+| `dispute_id` | `UUID` | FK → disputes.id (1:1) |
+| `decision` | `ENUM('refund','partial','none')` | Решение |
+| `amount` | `DECIMAL(10,2)` | Сумма возврата |
+| `resolved_by` | `UUID` | FK → users.id (администратор) |
+| `resolved_at` | `TIMESTAMPTZ` | Дата закрытия |
+
+---
+
+## 2.3. Ключевые архитектурные решения модели
+
+### Решение 1: UUID вместо SERIAL
+Все первичные ключи — `UUID` (генерируются на клиенте через `gen_random_uuid()`). Это:
+- Исключает конфликты при репликации БД
+- Позволяет создавать записи без обращения к БД (важно для распределённых систем)
+- Затрудняет enumeration-атаки (нельзя угадать ID следующего заказа)
+
+### Решение 2: DECIMAL для финансовых данных
+Все денежные суммы — `DECIMAL(10,2)` или `DECIMAL(12,2)`, **никогда FLOAT**. Это исключает ошибки округления при поминутном биллинге и расчёте комиссий.
+
+### Решение 3: JSONB для гибких структур
+`JSONB` используется для:
+- `wallets.payout_details` — разнородные реквизиты
+- `availability_schedules.weekly_slots` — расписание
+- `hardware_specs` (потенциально) — для новых типов железа без миграций
+
+JSONB индексируется через GIN, что позволяет эффективно искать по вложенным полям.
+
+### Решение 4: Idempotency Key на уровне БД
+Поля `idempotency_key` с UNIQUE-ограничением в `bookings` и `escrow_transactions` — это **последняя линия защиты** от двойных списаний. Даже если приложение отправит запрос дважды, БД отклонит дубликат.
+
+### Решение 5: Разделение TelemetrySession и MetricsSnapshot
+Сырые метрики (высокочастотные) отделены от сессий (низкочастотные). Это позволяет:
+- Партиционировать `metrics_snapshots` по времени
+- Архивировать старые метрики без влияния на бизнес-данные
+- Использовать разные стратегии бэкапа
+
+---
+
+## 2.4. Связь модели с бизнес-требованиями (трассировка)
+
+| Бизнес-требование (Итерация 2-3) | Отвечающие таблицы | Как модель обеспечивает требование |
+|----------------------------------|--------------------|-------------------------------------|
+| **Supply Growth** (монетизация) | `nodes`, `availability_schedules`, `reputations` | Гибкое расписание + рейтинг стимулируют провайдеров подключать оборудование |
+| **Demand Activation** (доступность) | `nodes`, `hardware_specs`, `bookings` | Фильтрация по характеристикам + мгновенное создание брони |
+| **Trust & Escrow** (безопасность) | `bookings`, `escrow_transactions`, `wallets` | Холдирование средств + UNIQUE idempotency_key + CHECK-ограничения |
+| **Billing Automation** | `billing_records`, `telemetry_sessions`, `metrics_snapshots` | Поминутное списание привязано к реальным метрикам |
+| **Host Security** | `telemetry_sessions`, `agent_states`, `access_credentials` | Изоляция сессий + контроль heartbeat + SSH-ключи вместо паролей |
+| **SLA Assurance** | `metrics_snapshots`, `disputes`, `evidences` | Объективные данные для разрешения споров (KPI: Dispute Resolution ≤ 24ч) |
+| **152-ФЗ Compliance** | `users`, `verifications` | Хэширование паролей, хранение только хэшей документов, шифрование полей |
+| **PCI DSS** | `wallets`, `escrow_transactions` | Никаких данных карт — только `gateway_id` от платёжного шлюза |
+
