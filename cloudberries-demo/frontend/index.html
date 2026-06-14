@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Cloudberries</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <div class="header">
+        <div class="logo" onclick="window.ui.showView('catalog')">
+            <img src="logo.png" alt="Logo" class="logo-img">
+            Cloudberries
+        </div>
+        <div class="nav-links">
+            <div class="nav-link active" id="nav-catalog" onclick="window.ui.showView('catalog')">Каталог</div>
+            <div class="nav-link" id="nav-profile" onclick="window.ui.showView('profile')">Мои аренды</div>
+            <div class="nav-link" id="nav-provider" onclick="window.ui.showView('provider')">Я Поставщик</div>
+            <div class="nav-link" id="nav-admin" onclick="window.ui.showView('admin')">Админка</div>
+        </div>
+        <div class="user-info">
+            <span id="header-balance" style="cursor:pointer;" onclick="window.ui.showView('profile')">0 ₽</span>
+        </div>
+    </div>
+
+    <div class="container">
+        <div id="catalog-view" class="view active">
+            <div class="catalog-filters">
+                <div class="filter-btn active" onclick="window.ui.filterCatalog('all')">Все</div>
+                <div class="filter-btn" onclick="window.ui.filterCatalog('ml')">🧠 Обучение ML</div>
+                <div class="filter-btn" onclick="window.ui.filterCatalog('web')">🌐 Хостинг сайтов</div>
+                <div class="filter-btn" onclick="window.ui.filterCatalog('game')">🎮 Игровые серверы</div>
+            </div>
+            <div class="catalog-grid" id="catalog-grid"></div>
+        </div>
+
+        <div id="profile-view" class="view">
+            <div class="profile-grid">
+                <div class="profile-sidebar">
+                    <h3>Баланс клиента</h3>
+                    <div class="big-balance" id="prof-balance">0.00 ₽</div>
+                    <div class="frozen-label">В эскроу: <span id="prof-frozen">0.00 ₽</span></div>
+                    <div style="display:flex; gap:10px; margin-top:15px;">
+                        <input type="number" id="topup-amount" value="1000" class="rent-input" style="width: 80px;">
+                        <button class="btn btn-primary btn-sm" onclick="api.topUp()">Пополнить</button>
+                    </div>
+                </div>
+                <div class="dashboard" id="client-dashboard"></div>
+            </div>
+        </div>
+
+        <div id="provider-view" class="view">
+            <div class="profile-grid">
+                <div class="profile-sidebar">
+                    <h3>Профиль поставщика</h3>
+                    <div class="big-balance" id="prov-balance">0.00 ₽</div>
+                    <button class="btn btn-primary" style="width:100%; margin-top:15px;" onclick="api.connectNode()">🔌 Подключить ноду</button>
+                </div>
+                <div class="dashboard" id="provider-dashboard"></div>
+            </div>
+        </div>
+
+        <div id="admin-view" class="view">
+            <h2>Панель арбитража</h2>
+            <div id="admin-list"></div>
+        </div>
+    </div>
+
+    <div id="node-modal" class="modal-overlay" onclick="if(event.target===this)window.ui.closeModal()">
+        <div class="modal-content">
+            <span class="close-modal" onclick="window.ui.closeModal()">×</span>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>
