@@ -9,3 +9,21 @@
 - Обучение нейронных сетей и ML-моделей
 - Хостинг веб-приложений и сайтов
 - Научные вычисления и симуляции
+
+## Запуск прототипа
+1. Проверить установлен ли GoLang<br>
+   ```go version```<br>
+   если его нет, то установить<br>
+   ```sudo pacman -S go```
+2. Проверить установлен ли Docker и docker-compose<br>
+   ```docker --version```<br>
+   ```docker compose version```<br>
+   если нет, то установить<br>
+   ```sudo pacman -S docker```<br>
+   ```sudo pacman -S docker-compose```<br>
+4. Запускаем docker compose<br>
+   ```cd /cloudberries-demo/```<br>
+   ```sudo docker-compose up -d```<br>
+6. Запускаем бэкэнд<br>
+   ```cd cloudberries-demo/backend/```<br>
+   ```go run .```
