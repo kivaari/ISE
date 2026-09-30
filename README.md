@@ -26,7 +26,7 @@
 4. Запускаем docker compose<br>
    ```cd /cloudberries-demo/```<br>
    ```sudo docker-compose up -d```<br>
-6. Запускаем бэкэнд<br>
+6. Запуск<br>
    ```cd cloudberries-demo/backend/```<br>
    ```go run .```
 ---
