@@ -1,0 +1,2089 @@
+openapi: 3.0.3
+info:
+  title: Cloudberries API
+  version: 1.0.0
+  description: |
+    P2P-маркетплейс вычислительных мощностей с эскроу и арбитражем.
+
+    Публичный API для клиентов, провайдеров и администраторов.
+    Node Agent общается с платформой по gRPC (proto/agent.proto) и в этот
+    OpenAPI-контракт не входит. Все денежные POST-операции идемпотентны по
+    заголовку `Idempotency-Key`.
+  contact:
+    name: Cloudberries Team
+    email: api@cloudberries.ru
+  license:
+    name: Proprietary
+servers:
+  - url: https://api.cloudberries.ru/api/v1
+    description: Production
+  - url: https://staging-api.cloudberries.ru/api/v1
+    description: Staging
+  - url: http://localhost:8080/api/v1
+    description: Local development
+security:
+  - BearerAuth: []
+tags:
+  - name: Auth
+    description: Регистрация, вход, refresh, KYC
+  - name: Catalog
+    description: Публичный каталог нод
+  - name: Nodes
+    description: Онбординг и управление нодами провайдера
+  - name: Bookings
+    description: Бронирование, оплата, доступ
+  - name: Disputes
+    description: Споры сторон
+  - name: Arbitration
+    description: Арбитраж (ADMIN)
+  - name: Wallet
+    description: Баланс и история транзакций
+  - name: Payouts
+    description: Выплаты провайдеру
+  - name: Admin
+    description: Модерация, KYC, аналитика, комиссии
+  - name: Webhooks
+    description: Входящие вебхуки внешних провайдеров
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Регистрация клиента или провайдера
+      security: []
+      x-public: true
+      x-required-roles: []
+      x-required-scopes: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Пользователь создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Вход по email и паролю
+      security: []
+      x-public: true
+      x-required-roles: []
+      x-required-scopes: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Токены выданы
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshTokens
+      summary: Обновить access token по refresh token
+      security: []
+      x-public: true
+      x-required-roles: []
+      x-required-scopes: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Новая пара токенов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Отозвать refresh token и занести access token в blacklist
+      x-required-roles: [CLIENT, PROVIDER, ADMIN]
+      x-required-scopes: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '204':
+          description: Выход выполнен
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/verify:
+    post:
+      tags: [Auth]
+      operationId: submitVerification
+      summary: Отправить документы на KYC-верификацию (PROVIDER)
+      x-required-roles: [PROVIDER]
+      x-required-scopes: [verifications:submit]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+      responses:
+        '202':
+          description: Документы приняты, статус PENDING
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationStatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      operationId: getCurrentUser
+      summary: Профиль текущего пользователя
+      x-required-roles: [CLIENT, PROVIDER, ADMIN]
+      x-required-scopes: []
+      responses:
+        '200':
+          description: Профиль
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /nodes:
+    get:
+      tags: [Catalog]
+      operationId: searchNodes
+      summary: Поиск доступных нод
+      security: []
+      x-public: true
+      x-required-roles: []
+      x-required-scopes: []
+      parameters:
+        - name: gpu
+          in: query
+          description: Только ноды с GPU
+          schema:
+            type: boolean
+        - name: region
+          in: query
+          description: Регион размещения
+          schema:
+            type: string
+            example: msk-1
+        - name: price_max
+          in: query
+          description: Максимальная цена за час, RUB
+          schema:
+            type: number
+            multipleOf: 0.01
+            minimum: 0
+        - name: cpu_min
+          in: query
+          description: Минимальное число CPU-ядер
+          schema:
+            type: integer
+            minimum: 1
+        - name: ram_min
+          in: query
+          description: Минимальный объём RAM, GB
+          schema:
+            type: integer
+            minimum: 1
+        - name: status
+          in: query
+          description: Фильтр по статусу (по умолчанию только ONLINE)
+          schema:
+            $ref: '#/components/schemas/NodeStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список нод; пустой результат возвращает items []
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Nodes]
+      operationId: startNodeOnboarding
+      summary: Инициировать онбординг ноды и получить install token
+      x-required-roles: [PROVIDER]
+      x-required-scopes: [nodes:create]
+      responses:
+        '201':
+          description: Токен установки создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeOnboardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /nodes/{id}:
+    get:
+      tags: [Catalog]
+      operationId: getNode
+      summary: Детали ноды
+      security: []
+      x-public: true
+      x-required-roles: []
+      x-required-scopes: []
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Детали ноды
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [Nodes]
+      operationId: updateNode
+      summary: Настроить цену и расписание своей ноды
+      x-required-roles: [PROVIDER, ADMIN]
+      # PROVIDER меняет свою ноду (nodes:update_own), ADMIN — в рамках модерации.
+      x-required-scopes: [nodes:update_own, nodes:moderate]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeUpdateRequest'
+      responses:
+        '200':
+          description: Конфигурация обновлена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /nodes/{id}/enable:
+    post:
+      tags: [Nodes]
+      operationId: enableNode
+      summary: Включить доступность ноды
+      x-required-roles: [PROVIDER, ADMIN]
+      x-required-scopes: [nodes:enable_own, nodes:moderate]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Нода включена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /nodes/{id}/disable:
+    post:
+      tags: [Nodes]
+      operationId: disableNode
+      summary: Выключить доступность ноды
+      x-required-roles: [PROVIDER, ADMIN]
+      x-required-scopes: [nodes:disable_own, nodes:moderate]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Нода выключена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /bookings:
+    get:
+      tags: [Bookings]
+      operationId: listBookings
+      summary: Список броней текущего пользователя
+      x-required-roles: [CLIENT, PROVIDER, ADMIN]
+      x-required-scopes: [bookings:read]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/BookingStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список броней
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Bookings]
+      operationId: createBooking
+      summary: Создать бронь (UC-1 шаг 3)
+      x-required-roles: [CLIENT]
+      x-required-scopes: [bookings:create]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingRequest'
+      responses:
+        '201':
+          description: Бронь создана, нода зарезервирована
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingResponse'
+        '200':
+          description: Повторный запрос с тем же Idempotency-Key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /bookings/{id}:
+    get:
+      tags: [Bookings]
+      operationId: getBooking
+      summary: Детали брони
+      x-required-roles: [CLIENT, PROVIDER, ADMIN]
+      x-required-scopes: [bookings:read]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Детали брони
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /bookings/{id}/cancel:
+    post:
+      tags: [Bookings]
+      operationId: cancelBooking
+      summary: Отменить бронь до оплаты (UC-1 alt 3a)
+      x-required-roles: [CLIENT]
+      x-required-scopes: [bookings:cancel]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      responses:
+        '204':
+          description: Бронь отменена, резерв снят
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /bookings/{id}/pay:
+    post:
+      tags: [Bookings]
+      operationId: payBooking
+      summary: Оплатить бронь и запустить асинхронную активацию (UC-1 шаги 4-8)
+      x-required-roles: [CLIENT]
+      x-required-scopes: [bookings:pay]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PayRequest'
+      responses:
+        '200':
+          description: Оплата подтверждена, обработка активации завершена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingDetail'
+        '202':
+          description: Платёж принят или ожидает webhook/активацию; состояние брони нужно опрашивать
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /bookings/{id}/complete:
+    post:
+      tags: [Bookings]
+      operationId: completeBooking
+      summary: Завершить аренду (UC-1 шаг 10 / alt 9a)
+      description: |
+        Клиент завершает свою ACTIVE-бронь досрочно. ADMIN может завершить
+        бронь принудительно (scope bookings:force_complete). Завершение по
+        таймеру выполняет фоновый job и публикует BookingCompleted; отдельный
+        публичный эндпоинт для него не нужен.
+      x-required-roles: [CLIENT, ADMIN]
+      # CLIENT завершает свою бронь (bookings:complete), ADMIN — принудительно
+      # (bookings:force_complete). Достаточно любого из scopes.
+      x-required-scopes: [bookings:complete, bookings:force_complete]
+      x-authorization:
+        - roles: [CLIENT]
+          scopes: [bookings:complete]
+        - roles: [ADMIN]
+          scopes: [bookings:force_complete]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteRequest'
+      responses:
+        '200':
+          description: Аренда завершена, выполнены расчёт и распределение
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /bookings/{id}/credentials:
+    get:
+      tags: [Bookings]
+      operationId: getBookingCredentials
+      summary: Получить SSH-доступ к активной брони (UC-1 шаг 9)
+      x-required-roles: [CLIENT]
+      x-required-scopes: [bookings:credentials]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Учётные данные для SSH; пароль отдаётся только владельцу брони
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessCredentials'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /disputes:
+    get:
+      tags: [Disputes]
+      operationId: listDisputes
+      summary: Список споров текущего пользователя
+      x-required-roles: [CLIENT, PROVIDER, ADMIN]
+      x-required-scopes: [disputes:read]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/DisputeStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список споров
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisputeListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Disputes]
+      operationId: openDispute
+      summary: Открыть спор по брони (UC-3 шаг 1)
+      x-required-roles: [CLIENT, PROVIDER]
+      x-required-scopes: [disputes:create]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisputeRequest'
+      responses:
+        '201':
+          description: Спор создан, эскроу заморожен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisputeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /disputes/{id}:
+    get:
+      tags: [Disputes]
+      operationId: getDispute
+      summary: Детали спора и доказательства
+      x-required-roles: [CLIENT, PROVIDER, ADMIN]
+      x-required-scopes: [disputes:read]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Материалы спора
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisputeDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /arbitration/disputes:
+    get:
+      tags: [Arbitration]
+      operationId: listArbitrationDisputes
+      summary: Очередь споров для арбитра
+      x-required-roles: [ADMIN]
+      x-required-scopes: [disputes:read_all]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/DisputeStatus'
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список споров
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisputeListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /arbitration/disputes/{id}/resolve:
+    post:
+      tags: [Arbitration]
+      operationId: resolveDispute
+      summary: Принять решение по спору (UC-3 шаг 5)
+      x-required-roles: [ADMIN]
+      x-required-scopes: [disputes:resolve]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveRequest'
+      responses:
+        '200':
+          description: Решение исполнено, средства распределены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResolutionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /wallet:
+    get:
+      tags: [Wallet]
+      operationId: getWallet
+      summary: Баланс кошелька (UC-4 шаг 1)
+      x-required-roles: [CLIENT, PROVIDER, ADMIN]
+      x-required-scopes: [wallet:read]
+      responses:
+        '200':
+          description: Баланс, заморозка и доступная сумма
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /wallet/transactions:
+    get:
+      tags: [Wallet]
+      operationId: listWalletTransactions
+      summary: История транзакций (UC-4 шаг 6)
+      x-required-roles: [CLIENT, PROVIDER, ADMIN]
+      x-required-scopes: [wallet:read]
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/LedgerEntryType'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список транзакций
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /payouts:
+    get:
+      tags: [Payouts]
+      operationId: listPayouts
+      summary: Список выплат
+      x-required-roles: [PROVIDER, ADMIN]
+      x-required-scopes: [payouts:read]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/PayoutStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список выплат
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayoutListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Payouts]
+      operationId: requestPayout
+      summary: Запросить вывод средств (UC-4 шаг 4)
+      x-required-roles: [PROVIDER]
+      x-required-scopes: [payouts:create]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PayoutRequest'
+      responses:
+        '201':
+          description: Заявка создана
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayoutResponse'
+        '200':
+          description: Повторный запрос с тем же Idempotency-Key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayoutResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /payouts/{id}:
+    get:
+      tags: [Payouts]
+      operationId: getPayout
+      summary: Статус выплаты
+      x-required-roles: [PROVIDER, ADMIN]
+      x-required-scopes: [payouts:read]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Детали выплаты
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayoutDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/users:
+    get:
+      tags: [Admin]
+      operationId: listUsers
+      summary: Список пользователей
+      x-required-roles: [ADMIN]
+      x-required-scopes: [users:read]
+      parameters:
+        - name: role
+          in: query
+          schema:
+            $ref: '#/components/schemas/Role'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, BLOCKED]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список пользователей
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/users/{id}/block:
+    post:
+      tags: [Admin]
+      operationId: blockUser
+      summary: Заблокировать пользователя
+      x-required-roles: [ADMIN]
+      x-required-scopes: [users:block]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BlockUserRequest'
+      responses:
+        '200':
+          description: Пользователь заблокирован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/verifications:
+    get:
+      tags: [Admin]
+      operationId: listVerifications
+      summary: Очередь KYC-заявок
+      x-required-roles: [ADMIN]
+      x-required-scopes: [verifications:read]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/VerificationStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список заявок
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/verifications/{id}/approve:
+    post:
+      tags: [Admin]
+      operationId: approveVerification
+      summary: Одобрить или отклонить KYC-заявку
+      x-required-roles: [ADMIN]
+      x-required-scopes: [verifications:approve]
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveVerificationRequest'
+      responses:
+        '200':
+          description: Статус заявки обновлён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Verification'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/analytics:
+    get:
+      tags: [Admin]
+      operationId: getAnalytics
+      summary: Агрегированная аналитика платформы
+      x-required-roles: [ADMIN]
+      x-required-scopes: [analytics:read]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Метрики за период
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/commissions:
+    put:
+      tags: [Admin]
+      operationId: updateCommission
+      summary: Изменить ставку комиссии платформы
+      x-required-roles: [ADMIN]
+      x-required-scopes: [commissions:manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommissionUpdate'
+      responses:
+        '200':
+          description: Комиссия обновлена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommissionUpdate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /webhooks/payments/yookassa:
+    post:
+      tags: [Webhooks]
+      operationId: yookassaWebhook
+      summary: Вебхук ЮKassa (payment.succeeded / payment.canceled)
+      description: |
+        Публичный эндпоинт без JWT. Аутентификация — по IP-адресам ЮKassa и
+        повторной проверке платежа через API провайдера. Тело обрабатывается
+        идемпотентно по `object.id`.
+      security: []
+      x-public: true
+      x-required-roles: []
+      x-required-scopes: []
+      parameters:
+        - name: X-Request-Id
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Идентификатор доставки для трассировки
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/YooKassaNotification'
+      responses:
+        '200':
+          description: Уведомление принято
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      description: UUID ресурса
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID v7, стабильный для всех ретраев одной операции
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: UUID v7; рекомендуется для безопасных ретраев
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      description: Размер страницы
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      description: Смещение от начала выборки
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  responses:
+    BadRequest:
+      description: Некорректный запрос
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Требуется аутентификация
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Недостаточно прав или чужой ресурс
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Конфликт состояния или повторное использование ключа
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnprocessableEntity:
+      description: Семантическая ошибка (нода недоступна, лимит, просроченный спор)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PaymentRequired:
+      description: Платёж отклонён (UC-1 alt 5a)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Gone:
+      description: Ресурс истёк или отозван
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: Превышен rate limit
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: Внешний сервис недоступен (UC-1 alt 4a)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    GatewayTimeout:
+      description: Node Agent не ответил за отведённое время (UC-1 alt 8a)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Внутренняя ошибка
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    Role:
+      type: string
+      enum: [CLIENT, PROVIDER, ADMIN]
+
+    BookingStatus:
+      type: string
+      enum: [PENDING, ACTIVE, COMPLETED, CANCELLED, DISPUTED]
+
+    NodeStatus:
+      type: string
+      enum: [INACTIVE, ONLINE, BUSY, MAINTENANCE, OFFLINE, DISPUTED]
+
+    EscrowStatus:
+      type: string
+      enum: [HOLD, CAPTURED, FROZEN, REFUNDED, PARTIAL_REFUND]
+
+    DisputeStatus:
+      type: string
+      enum: [OPEN, EVIDENCE_REQUESTED, SETTLEMENT, RESOLVED, CLOSED]
+
+    PayoutStatus:
+      type: string
+      enum: [REQUESTED, PROCESSING, PAID, FAILED]
+
+    LedgerEntryType:
+      type: string
+      enum: [CREDIT, DEBIT, FEE, REFUND]
+
+    Decision:
+      type: string
+      enum: [REFUND_CLIENT, PAY_PROVIDER, SPLIT]
+
+    EvidenceType:
+      type: string
+      enum: [TELEMETRY, LOG, SCREENSHOT, MESSAGE]
+
+    VerificationStatus:
+      type: string
+      enum: [PENDING, APPROVED, REJECTED]
+
+    ErrorResponse:
+      type: object
+      required: [code, message, details]
+      properties:
+        code:
+          type: string
+          enum:
+            - VALIDATION_ERROR
+            - NOT_FOUND
+            - CONFLICT
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - PAYMENT_REQUIRED
+            - AGENT_TIMEOUT
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    RegisterRequest:
+      type: object
+      required: [email, password, role]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        role:
+          type: string
+          enum: [CLIENT, PROVIDER]
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: Opaque refresh token, хранится в виде хеша
+
+    VerifyRequest:
+      type: object
+      required: [doc_type, file_id]
+      properties:
+        doc_type:
+          type: string
+          enum: [PASSPORT, INN, SELF_EMPLOYED, COMPANY]
+        file_id:
+          type: string
+          format: uuid
+        comment:
+          type: string
+          maxLength: 1000
+
+    VerificationStatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: '#/components/schemas/VerificationStatus'
+
+    UserProfile:
+      type: object
+      required: [id, email, role, verification_status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/Role'
+        verification_status:
+          $ref: '#/components/schemas/VerificationStatus'
+        created_at:
+          type: string
+          format: date-time
+
+    AuthResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: TTL access token в секундах
+          example: 900
+
+    HardwareSpecs:
+      type: object
+      required: [cpu_cores, ram_gb, disk_gb]
+      properties:
+        cpu_model:
+          type: string
+        gpu_model:
+          type: string
+          nullable: true
+        gpu_vram_gb:
+          type: integer
+          nullable: true
+          minimum: 1
+        cpu_cores:
+          type: integer
+          minimum: 1
+        ram_gb:
+          type: integer
+          minimum: 1
+        disk_gb:
+          type: integer
+          minimum: 1
+
+    AvailabilitySlot:
+      type: object
+      required: [day_of_week, from_time, to_time]
+      properties:
+        day_of_week:
+          type: integer
+          minimum: 0
+          maximum: 6
+        from_time:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          example: '09:00'
+        to_time:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          example: '21:00'
+
+    NodeSummary:
+      type: object
+      required: [id, cpu_cores, ram_gb, price_per_hour, region, status, reputation]
+      properties:
+        id:
+          type: string
+          format: uuid
+        gpu_model:
+          type: string
+          nullable: true
+        gpu_vram_gb:
+          type: integer
+          nullable: true
+        cpu_cores:
+          type: integer
+        ram_gb:
+          type: integer
+        price_per_hour:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+        region:
+          type: string
+        status:
+          $ref: '#/components/schemas/NodeStatus'
+        reputation:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 5
+
+    NodeDetail:
+      allOf:
+        - $ref: '#/components/schemas/NodeSummary'
+        - type: object
+          properties:
+            hardware_specs:
+              $ref: '#/components/schemas/HardwareSpecs'
+            schedule:
+              type: array
+              items:
+                $ref: '#/components/schemas/AvailabilitySlot'
+
+    NodeListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeSummary'
+        total:
+          type: integer
+
+    NodeOnboardResponse:
+      type: object
+      required: [install_token, script_url, expires_at]
+      properties:
+        install_token:
+          type: string
+          description: Одноразовый токен для Node Agent
+        script_url:
+          type: string
+          format: uri
+        expires_at:
+          type: string
+          format: date-time
+
+    NodeUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        price_per_hour:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+        schedule:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvailabilitySlot'
+
+    BookingRequest:
+      type: object
+      required: [node_id, duration_minutes]
+      properties:
+        node_id:
+          type: string
+          format: uuid
+        duration_minutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+          description: Минимум 60 минут проверяется PricingPolicy
+
+    BookingResponse:
+      type: object
+      required: [id, status, price_snapshot, planned_duration_minutes, node_id, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        node_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/BookingStatus'
+        price_snapshot:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+        planned_duration_minutes:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    BookingDetail:
+      allOf:
+        - $ref: '#/components/schemas/BookingResponse'
+        - type: object
+          properties:
+            started_at:
+              type: string
+              format: date-time
+              nullable: true
+            ended_at:
+              type: string
+              format: date-time
+              nullable: true
+            total_amount:
+              type: number
+              multipleOf: 0.01
+              minimum: 0
+            escrow_status:
+              $ref: '#/components/schemas/EscrowStatus'
+
+    BookingListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BookingResponse'
+        total:
+          type: integer
+
+    AccessCredentials:
+      type: object
+      required: [ip, port, ssh_login, expires_at]
+      properties:
+        ip:
+          type: string
+          format: ipv4
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        ssh_login:
+          type: string
+        ssh_public_key:
+          type: string
+        ssh_password:
+          type: string
+          description: Расшифровывается на сервере и отдаётся только владельцу ACTIVE-брони
+        expires_at:
+          type: string
+          format: date-time
+
+    PayRequest:
+      type: object
+      required: [payment_method_id]
+      properties:
+        payment_method_id:
+          type: string
+          description: Токенизированная карта в Payment Gateway
+        return_url:
+          type: string
+          format: uri
+          description: URL возврата после 3-D Secure
+
+    PayResponse:
+      type: object
+      required: [status, redirect_url]
+      properties:
+        status:
+          type: string
+          enum: [PENDING_3DS]
+        redirect_url:
+          type: string
+          format: uri
+
+    CompleteRequest:
+      type: object
+      properties:
+        actual_minutes:
+          type: integer
+          minimum: 1
+          description: Фактическое время аренды для prorate; по умолчанию now - started_at
+
+    DisputeRequest:
+      type: object
+      required: [booking_id, reason]
+      properties:
+        booking_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+          maxLength: 1000
+
+    DisputeResponse:
+      type: object
+      required: [id, booking_id, status, deadline_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        booking_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/DisputeStatus'
+        deadline_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    Evidence:
+      type: object
+      required: [id, type, reference_id, attached_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/EvidenceType'
+        reference_id:
+          type: string
+        attached_at:
+          type: string
+          format: date-time
+
+    DisputeDetail:
+      allOf:
+        - $ref: '#/components/schemas/DisputeResponse'
+        - type: object
+          properties:
+            evidence:
+              type: array
+              items:
+                $ref: '#/components/schemas/Evidence'
+
+    DisputeListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DisputeResponse'
+        total:
+          type: integer
+
+    ResolveRequest:
+      type: object
+      required: [decision, amount_client, amount_provider]
+      properties:
+        decision:
+          $ref: '#/components/schemas/Decision'
+        amount_client:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+        amount_provider:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+        comment:
+          type: string
+          maxLength: 2000
+
+    ResolutionResponse:
+      type: object
+      required: [resolution_id, status]
+      properties:
+        resolution_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [RESOLVED]
+
+    WalletResponse:
+      type: object
+      required: [balance, frozen, available, currency]
+      properties:
+        balance:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+        frozen:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+        available:
+          type: number
+          multipleOf: 0.01
+          minimum: 0
+        currency:
+          type: string
+          enum: [RUB]
+
+    Transaction:
+      type: object
+      required: [id, entry_type, amount, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        booking_id:
+          type: string
+          format: uuid
+          nullable: true
+        entry_type:
+          $ref: '#/components/schemas/LedgerEntryType'
+        amount:
+          type: number
+          multipleOf: 0.01
+        created_at:
+          type: string
+          format: date-time
+
+    TransactionListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+        total:
+          type: integer
+
+    PayoutRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          type: number
+          multipleOf: 0.01
+          minimum: 0.01
+          description: Минимальный порог проверяется WalletService.checkPayoutAllowed
+        bank_details:
+          type: object
+          properties:
+            account:
+              type: string
+            bic:
+              type: string
+
+    PayoutResponse:
+      type: object
+      required: [id, amount, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        amount:
+          type: number
+          multipleOf: 0.01
+        status:
+          $ref: '#/components/schemas/PayoutStatus'
+        created_at:
+          type: string
+          format: date-time
+
+    PayoutDetail:
+      allOf:
+        - $ref: '#/components/schemas/PayoutResponse'
+        - type: object
+          properties:
+            processed_at:
+              type: string
+              format: date-time
+              nullable: true
+            failure_reason:
+              type: string
+              nullable: true
+
+    PayoutListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PayoutResponse'
+        total:
+          type: integer
+
+    AdminUser:
+      type: object
+      required: [id, email, role, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/Role'
+        status:
+          type: string
+          enum: [ACTIVE, BLOCKED]
+        created_at:
+          type: string
+          format: date-time
+
+    AdminUserListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminUser'
+        total:
+          type: integer
+
+    BlockUserRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 1000
+
+    Verification:
+      type: object
+      required: [id, user_id, status, doc_type, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/VerificationStatus'
+        doc_type:
+          type: string
+          enum: [PASSPORT, INN, SELF_EMPLOYED, COMPANY]
+        created_at:
+          type: string
+          format: date-time
+
+    VerificationListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Verification'
+        total:
+          type: integer
+
+    ApproveVerificationRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [APPROVE, REJECT]
+        comment:
+          type: string
+          maxLength: 1000
+
+    AnalyticsResponse:
+      type: object
+      required: [from, to, bookings_total, gmv, platform_fee, active_nodes]
+      properties:
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        bookings_total:
+          type: integer
+        gmv:
+          type: number
+        platform_fee:
+          type: number
+        active_nodes:
+          type: integer
+
+    CommissionUpdate:
+      type: object
+      required: [percent]
+      properties:
+        percent:
+          type: number
+          minimum: 0
+          maximum: 50
+
+    YooKassaNotification:
+      type: object
+      required: [type, event, object]
+      properties:
+        type:
+          type: string
+          enum: [notification]
+        event:
+          type: string
+          enum: [payment.succeeded, payment.canceled, refund.succeeded]
+        object:
+          type: object
+          required: [id, status, amount]
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+              enum: [pending, waiting_for_capture, succeeded, canceled]
+            amount:
+              type: object
+              required: [value, currency]
+              properties:
+                value:
+                  type: string
+                  pattern: '^[0-9]+\.[0-9]{2}$'
+                currency:
+                  type: string
+                  enum: [RUB]
+            metadata:
+              type: object
+              additionalProperties:
+                type: string
