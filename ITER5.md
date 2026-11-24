@@ -409,8 +409,21 @@ INSERT INTO dispute.evidences (dispute_id, evidence_type, reference_id) VALUES
 ('e1111111-1111-1111-1111-111111111111', 'TELEMETRY', 'd1111111-1111-1111-1111-111111111111');
 
 -- 8. Финансовая история (Провайдеру начислено за прошлую сессию)
+-- Историческое начисление относится к отдельной завершённой аренде, а не к
+-- текущей ACTIVE-брони c111...; это сохраняет инвариант ITER6:
+-- провайдер получает деньги только после завершения брони.
+INSERT INTO booking.bookings
+  (id, client_id, node_id, status, price_snapshot, planned_duration_minutes,
+   started_at, ended_at, total_amount, idempotency_key)
+VALUES
+  ('c2222222-2222-2222-2222-222222222222',
+   '22222222-2222-2222-2222-222222222222',
+   'b1111111-1111-1111-1111-111111111111',
+   'COMPLETED', 150.00, 120, '2026-11-16 10:00:00+03',
+   '2026-11-16 12:00:00+03', 300.00, 'idem-key-history-1');
+
 INSERT INTO wallet.billing_records (wallet_id, booking_id, entry_type, amount) VALUES
-('a2222222-2222-2222-2222-222222222222', 'c1111111-1111-1111-1111-111111111111', 'CREDIT', 285.00);
+('a2222222-2222-2222-2222-222222222222', 'c2222222-2222-2222-2222-222222222222', 'CREDIT', 285.00);
 ```
 
 
