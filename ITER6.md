@@ -163,38 +163,6 @@ L3 разделён на две части, чтобы диаграмма ост
 | `AnalyticsService` | app | Агрегация статистики доходов и операций | `BookingLookup`, `WalletRepository` |
 | `BookingCompletionJob` | app/worker | Завершение истёкших броней | `BookingService`, `Clock` |
 
-### Правила зависимостей (SOLID / GRASP)
-
-1. **DIP:** прикладные сервисы зависят от портов из `internal/domain/port`, а не
-   от `YooKassaAdapter`, `RedisCatalogQuery` и т. п.
-2. **Stable Abstractions:** порты меняются редко, адаптеры — часто.
-3. **No Cycles:** граф направленный:
-   `Identity ← Catalog ← Booking ← Dispute`, `Wallet ← Booking`,
-   `Telemetry ← Dispute`, `Notification ← события`. Обратных зависимостей нет.
-4. **GRASP Protected Variations:** новый платёжный шлюз — новый адаптер, ноль
-   изменений в `BookingService`.
-5. **GRASP Low Coupling / High Cohesion:** `EscrowService` отвечает только за
-   эскроу, `AccessProvisioner` — только за SSH-доступ.
-6. **SRP:** `BookingService` оркестрирует сценарий, но не считает цену
-   (`PricingPolicy`) и не хранит деньги (`WalletService`).
-
-### Проверка отсутствия циклов
-
-```
-AuthMiddleware → IdentityQuery → identity repo
-BookingService → CatalogQuery → catalog repo
-BookingService → EscrowPort → EscrowService → WalletPort → WalletService → wallet repo
-BookingService → PaymentGatewayPort → YooKassaAdapter
-BookingService → AgentPort → gRPC Agent Adapter
-DisputeService → BookingLookup / EscrowPort / TelemetryQuery / ReputationPort
-NotificationService ← EventBus ← BookingService / DisputeService / PayoutService
-```
-
-Ни один путь не возвращается в исходный компонент. `EscrowService` не зависит
-от `BookingService`; `WalletService` не зависит от `BookingService`;
-`NotificationService` не вызывает доменные сервисы, а только подписан на
-события.
-
 ## 1.5. ADR (Architecture Decision Records)
 
 В этой итерации — 5 ADR. ADR-001 объединяет ADR-001 (ITER4) и ADR-006 (ITER5);
@@ -368,8 +336,6 @@ Node Agent — высоконагруженный внутренний проц�
 
 ### 1.6.1. Трассировка: шаг → API → компонент/метод → таблица
 
-> Пути в таблице — с префиксом `/api/v1`; в `openapi.yaml` они записаны
-
 | Шаг | Действие / API | Компонент (порт) | Метод | Таблицы / артефакты | Альтернатива |
 |---|---|---|---|---|---|
 | 1 | `GET /api/v1/nodes?gpu=true&region=msk-1` | `CatalogService` → `CatalogQuery` | `searchNodes(filters)` | `catalog.nodes`, `catalog.hardware_specs`, Redis `CatalogIndex` | Пустой результат — `200` + `items: []`, не 404 |
@@ -427,109 +393,9 @@ Capture, активация и запуск контейнера выполня�
 | Все денежные POST идемпотентны | `Idempotency-Key` + уникальные индексы (ADR-008) |
 | `Redis` не источник истины | `reserve/release` идут в PG; Redis только кэш чтения |
 
-
-## 1.7. Обновлённое описание архитектуры
-
-### 1.7.1. Назначение и контекст
-
-Cloudberries — P2P-маркетплейс вычислительных мощностей. Клиент арендует
-GPU/CPU-сервер провайдера на часы, деньги проходят через эскроу, а спор
-разрешает администратор-арбитр. Ключевое отличие от обычного хостинга —
-Trust Layer: платформа удерживает средства до подтверждения результата и
-хранит телеметрию для арбитража.
-
-Система состоит из одного API-контейнера, PostgreSQL, Redis и двух внешних
-контуров: Payment Gateway (ЮKassa/Stripe) и Node Agent на сервере провайдера.
-Node Agent — не контейнер платформы: он устанавливается провайдером и
-общается с API по gRPC.
-
-### 1.7.2. Контейнеры и развёртывание
-
-| Контейнер | Технологии | Ответственность |
-|---|---|---|
-| `Cloudberries API` | Go 1.21, chi, pgx, gRPC | REST/gRPC серверы, доменные сервисы, порты, адаптеры |
-| `PostgreSQL 16` | SQL, 7 схем | System of Record, транзакции, FK, outbox, партиции телеметрии |
-| `Redis 7` | In-memory, TTL | Кэш каталога, идемпотентность, JWT blacklist, rate-limit |
-| `Node Agent` | Go/Rust, gRPC client | Heartbeat, containerd/Docker, телеметрия на хосте провайдера |
-| `Payment Gateway` | Внешний SaaS | Hold/capture/refund, 3-D Secure, вебхуки |
-
-Деплой MVP — один бинарник + PostgreSQL + Redis (docker-compose). При росте
-API масштабируется горизонтально за load balancer; PostgreSQL — vertical +
-read-replicas; Redis — Sentinel/Cluster. Outbox позволяет позже включить CDC →
-Kafka без изменения домена.
-
-### 1.7.3. Компонентная структура
-
-Слои:
-
-```
-cmd/            main, DI, gRPC/HTTP серверы
-web/            handlers, middleware, OpenAPI validation, rate-limit
-internal/app/   BookingService, EscrowService, CatalogService, ...
-internal/domain/ сущности, enum, порты
-internal/infra/ pgx-репозитории, Redis, YooKassa, gRPC-клиент
-```
-
-Правило импортов: `domain` не знает про `app`, `app` — про `infra` и `web`.
-`infra` реализует порты, объявленные в `domain`. Это даёт DIP и позволяет
-тестировать сценарии с fake-адаптерами без сети и БД.
-
-### 1.7.4. Данные
-
-- 18 доменных сущностей, 13 enum; инфраструктурные таблицы включают
-  `infra.inbox_events` (ITER4/ITER5 + миграция 006).
-- 7 схем по ограниченным контекстам.
-- `booking.bookings` — бронь, `price_snapshot`, `idempotency_key`.
-- `booking.escrow_transactions` — 1:1 к брони, `UNIQUE (booking_id)`.
-- `wallet.wallets` — `CHECK (frozen_amount <= balance)`.
-- `wallet.billing_records` — журнал начислений, `idempotency_key` (миграция 006).
-- `telemetry.metrics_snapshots` — RANGE-партиции по `recorded_at`.
-- `infra.outbox_events` — transactional outbox с отдельным `event_id`; дедупликация
-  бизнес-операций выполняется по idempotency key, а не по типу события (миграция 006).
-
-### 1.7.5. Ключевые сценарии
-
-| UC | Поток | Компоненты |
-|---|---|---|
-| UC-0 Регистрация/KYC | REST → AuthService → IdentityQuery | JWT, `identity.users`, `identity.verifications` |
-| UC-1 Аренда | REST → BookingService → PaymentGateway/Agent/Escrow | `booking`, `catalog`, `wallet`, `telemetry` |
-| UC-2 Онбординг ноды | REST + gRPC → NodeService → CatalogQuery | `catalog.nodes`, `agent_states` |
-| UC-3 Спор | REST → DisputeService → TelemetryQuery/EscrowPort | `dispute`, `telemetry`, `booking.escrow` |
-| UC-4 Выплата | REST → PayoutService → PayoutGatewayPort | `wallet.payout_requests` |
-
-### 1.7.6. Соответствие ASR механизмами
-
-| ASR | Механизм |
-|---|---|
-| ASR-1 | ACID в одной БД, outbox, идемпотентность, компенсации |
-| ASR-2 | `TelemetryQuery` + партиции, `EvidenceService`, 24-часовой дедлайн |
-| ASR-3 | Redis `CatalogIndex`, `CatalogQuery` с PG fallback |
-| ASR-4 | gRPC keepalive, heartbeat 20 с, `HeartbeatMonitor.sweep()` |
-| ASR-5 | TTL-credentials, проверка агентом, JWT blacklist, RBAC |
-| ASR-6 | Порты/адаптеры, правило импортов, схемы БД |
-| ASR-7 | `booking_id`/`idempotency_key` во всех денежных таблицах, outbox |
-
-### 1.7.7. Интеграции и безопасность
-
-- Payment Gateway — синхронный hold из команды оплаты; capture/refund выполняются
-  worker-ом после подтверждённого события; вебхук принимается через inbox и после
-  проверки и дедупликации сразу получает ответ `200`;
-  проверка IP и повторный запрос платежа, идемпотентность по `object.id`.
-- Node Agent — gRPC TLS/mTLS, unary-команды, client-streaming метрик,
-  персистентный журнал обработанных booking id.
-- Payout Gateway — HTTPS/REST, retry только на 5xx/сеть, идемпотентный ключ.
-- Email/Telegram — асинхронно через outbox, retry, DLQ.
-- KYC-провайдер — HTTPS/REST, synchronous submit + async webhook.
-- Аутентификация — JWT RS256 + refresh rotation + `tv`; авторизация — RBAC по
-  ролям и ownership.
-
-
 # Часть 2. API и интеграции
 
 ## 2.1. Системные операции
-
-Пути показаны с префиксом `/api/v1`; в `openapi.yaml` — относительно
-`servers[].url`. `Idempotency-Key` — заголовок.
 
 ### 2.1.1. REST-операции
 
@@ -629,8 +495,7 @@ internal/infra/ pgx-репозитории, Redis, YooKassa, gRPC-клиент
 
 ## 2.3. Спецификация OpenAPI 3
 
-Полная спецификация — [`openapi.yaml`](openapi.yaml). Она является single
-source of truth: из неё генерируются серверные stub'ы и клиентские SDK.
+Полная спецификация — [`openapi.yaml`](openapi.yaml).
 
 Фрагмент:
 
@@ -680,7 +545,7 @@ source of truth: из неё генерируются серверные stub'ы
 
 Спецификация проверена `openapi-spec-validator` и `validator.swagger.io`:
 0 ошибок, 31 path, 36 операций, 0 dangling `$ref`. Для ручной проверки
-достаточно открыть `openapi.yaml` в <https://editor.swagger.io/>.
+достаточно открыть `openapi.yaml` в <[TYT](https://forge.etsi.org/swagger/editor/)>.
 
 ## 2.4. Таблица трассировки: шаг сценария → API → класс и метод → таблица
 
