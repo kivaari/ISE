@@ -9,9 +9,6 @@ info:
     Node Agent общается с платформой по gRPC (proto/agent.proto) и в этот
     OpenAPI-контракт не входит. Все денежные POST-операции идемпотентны по
     заголовку `Idempotency-Key`.
-  contact:
-    name: Cloudberries Team
-    email: api@cloudberries.ru
   license:
     name: Proprietary
 servers:
