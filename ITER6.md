@@ -545,7 +545,7 @@ Capture, активация и запуск контейнера выполня�
 
 Спецификация проверена `openapi-spec-validator` и `validator.swagger.io`:
 0 ошибок, 31 path, 36 операций, 0 dangling `$ref`. Для ручной проверки
-достаточно открыть `openapi.yaml` в <https://editor.swagger.io/>.
+достаточно открыть `openapi.yaml` в <[TYT](https://forge.etsi.org/swagger/editor/)>.
 
 ## 2.4. Таблица трассировки: шаг сценария → API → класс и метод → таблица
 
